@@ -16,11 +16,13 @@ class SegformerPipeline:
     def __init__(self):
         self.model_name = ''
         self.segment_label = []
+        self.processor = None
+        self.model = None
 
 SegPipeline = SegformerPipeline()
 
 # 切割服装
-def get_segmentation(tensor_image, model_name='segformer_b2_clothes'):
+def get_segmentation(tensor_image, model_name='segformer_b2_clothes', device='cuda'):
     cloth = tensor2pil(tensor_image)
     model_folder_path = os.path.join(folder_paths.models_dir, model_name)
     try:
@@ -28,15 +30,34 @@ def get_segmentation(tensor_image, model_name='segformer_b2_clothes'):
     except:
         pass
 
-    processor = SegformerImageProcessor.from_pretrained(model_folder_path)
-    model = AutoModelForSemanticSegmentation.from_pretrained(model_folder_path)
+    # Use pipeline's processor and model if available
+    if SegPipeline.processor is not None and SegPipeline.model is not None:
+        processor = SegPipeline.processor
+        model = SegPipeline.model
+    else:
+        processor = SegformerImageProcessor.from_pretrained(model_folder_path)
+        model = AutoModelForSemanticSegmentation.from_pretrained(model_folder_path)
+        model = model.to(device)
+    
     # 预处理和预测
     inputs = processor(images=cloth, return_tensors="pt")
-    outputs = model(**inputs)
+    # Move inputs to the same device as model
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    
+    # Run inference
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    # Move logits to CPU for further processing
     logits = outputs.logits.cpu()
     upsampled_logits = nn.functional.interpolate(logits, size=cloth.size[::-1], mode="bilinear", align_corners=False)
     pred_seg = upsampled_logits.argmax(dim=1)[0].numpy()
-    return pred_seg,cloth
+    
+    # Clear CUDA cache if using GPU
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+        
+    return pred_seg, cloth
 
 
 class Segformer_B2_Clothes:
@@ -180,33 +201,13 @@ class SegformerClothesPipelineLoader:
         self.NODE_NAME = 'SegformerClothesPipelineLoader'
         pass
 
-    # Labels: 0: "Background", 1: "Hat", 2: "Hair", 3: "Sunglasses", 4: "Upper-clothes",
-    # 5: "Skirt", 6: "Pants", 7: "Dress", 8: "Belt", 9: "Left-shoe", 10: "Right-shoe",
-    # 11: "Face", 12: "Left-leg", 13: "Right-leg", 14: "Left-arm", 15: "Right-arm",
-    #  17: "Scarf"
-
     @classmethod
     def INPUT_TYPES(cls):
         model_list = ['segformer_b3_clothes', 'segformer_b2_clothes']
+        device_list = ['cuda', 'cpu']
         return {"required":
             {   "model": (model_list,),
-                "face": ("BOOLEAN", {"default": False, "label_on": "enabled(脸)", "label_off": "disabled(脸)"}),
-                "hair": ("BOOLEAN", {"default": False, "label_on": "enabled(头发)", "label_off": "disabled(头发)"}),
-                "hat": ("BOOLEAN", {"default": False, "label_on": "enabled(帽子)", "label_off": "disabled(帽子)"}),
-                "sunglass": ("BOOLEAN", {"default": False, "label_on": "enabled(墨镜)", "label_off": "disabled(墨镜)"}),
-                "left_arm": ("BOOLEAN", {"default": False, "label_on": "enabled(左臂)", "label_off": "disabled(左臂)"}),
-                "right_arm": ("BOOLEAN", {"default": False, "label_on": "enabled(右臂)", "label_off": "disabled(右臂)"}),
-                "left_leg": ("BOOLEAN", {"default": False, "label_on": "enabled(左腿)", "label_off": "disabled(左腿)"}),
-                "right_leg": ("BOOLEAN", {"default": False, "label_on": "enabled(右腿)", "label_off": "disabled(右腿)"}),
-                "left_shoe": ("BOOLEAN", {"default": False, "label_on": "enabled(左鞋)", "label_off": "disabled(左鞋)"}),
-                "right_shoe": ("BOOLEAN", {"default": False, "label_on": "enabled(右鞋)", "label_off": "disabled(右鞋)"}),
-                "upper_clothes": ("BOOLEAN", {"default": False, "label_on": "enabled(上衣)", "label_off": "disabled(上衣)"}),
-                "skirt": ("BOOLEAN", {"default": False, "label_on": "enabled(短裙)", "label_off": "disabled(短裙)"}),
-                "pants": ("BOOLEAN", {"default": False, "label_on": "enabled(裤子)", "label_off": "disabled(裤子)"}),
-                "dress": ("BOOLEAN", {"default": False, "label_on": "enabled(连衣裙)", "label_off": "disabled(连衣裙)"}),
-                "belt": ("BOOLEAN", {"default": False, "label_on": "enabled(腰带)", "label_off": "disabled(腰带)"}),
-                "bag": ("BOOLEAN", {"default": False, "label_on": "enabled(背包)", "label_off": "disabled(背包)"}),
-                "scarf": ("BOOLEAN", {"default": False, "label_on": "enabled(围巾)", "label_off": "disabled(围巾)"}),
+                "device": (device_list,),
             }
         }
 
@@ -215,50 +216,23 @@ class SegformerClothesPipelineLoader:
     FUNCTION = "segformer_clothes_pipeline_loader"
     CATEGORY = '😺dzNodes/LayerMask'
 
-    def segformer_clothes_pipeline_loader(self, model,
-                        face, hat, hair, sunglass,
-                        left_leg, right_leg, left_arm, right_arm, left_shoe, right_shoe,
-                        upper_clothes, skirt, pants, dress, belt, bag, scarf,
-                        ):
-
+    def segformer_clothes_pipeline_loader(self, model, device):
         pipeline = SegformerPipeline()
-        labels_to_keep = [0]
-        if not hat:
-            labels_to_keep.append(1)
-        if not hair:
-            labels_to_keep.append(2)
-        if not sunglass:
-            labels_to_keep.append(3)
-        if not upper_clothes:
-            labels_to_keep.append(4)
-        if not skirt:
-            labels_to_keep.append(5)
-        if not pants:
-            labels_to_keep.append(6)
-        if not dress:
-            labels_to_keep.append(7)
-        if not belt:
-            labels_to_keep.append(8)
-        if not left_shoe:
-            labels_to_keep.append(9)
-        if not right_shoe:
-            labels_to_keep.append(10)
-        if not face:
-            labels_to_keep.append(11)
-        if not left_leg:
-            labels_to_keep.append(12)
-        if not right_leg:
-            labels_to_keep.append(13)
-        if not left_arm:
-            labels_to_keep.append(14)
-        if not right_arm:
-            labels_to_keep.append(15)
-        if not bag:
-            labels_to_keep.append(16)
-        if not scarf:
-            labels_to_keep.append(17)
-        pipeline.segment_label = labels_to_keep
         pipeline.model_name = model
+        pipeline.segment_label = [0]  # Default to only background
+        
+        # Get model path
+        model_folder_path = os.path.join(folder_paths.models_dir, model)
+        try:
+            model_folder_path = os.path.normpath(folder_paths.folder_names_and_paths[model][0][0])
+        except:
+            pass
+            
+        # Create processor and model
+        pipeline.processor = SegformerImageProcessor.from_pretrained(model_folder_path)
+        pipeline.model = AutoModelForSemanticSegmentation.from_pretrained(model_folder_path)
+        pipeline.model = pipeline.model.to(device)
+        
         return (pipeline,)
 
 class SegformerFashionPipelineLoader:
@@ -445,10 +419,27 @@ class SegformerUltraV2:
     def INPUT_TYPES(cls):
         method_list = ['VITMatte', 'VITMatte(local)', 'PyMatting', 'GuidedFilter', ]
         device_list = ['cuda', 'cpu']
-        return {"required":
-            {
+        return {
+            "required": {
                 "image": ("IMAGE",),
                 "segformer_pipeline": ("SegPipeline",),
+                "face": ("BOOLEAN", {"default": False, "label_on": "enabled(脸)", "label_off": "disabled(脸)"}),
+                "hair": ("BOOLEAN", {"default": False, "label_on": "enabled(头发)", "label_off": "disabled(头发)"}),
+                "hat": ("BOOLEAN", {"default": False, "label_on": "enabled(帽子)", "label_off": "disabled(帽子)"}),
+                "sunglass": ("BOOLEAN", {"default": False, "label_on": "enabled(墨镜)", "label_off": "disabled(墨镜)"}),
+                "left_arm": ("BOOLEAN", {"default": False, "label_on": "enabled(左臂)", "label_off": "disabled(左臂)"}),
+                "right_arm": ("BOOLEAN", {"default": False, "label_on": "enabled(右臂)", "label_off": "disabled(右臂)"}),
+                "left_leg": ("BOOLEAN", {"default": False, "label_on": "enabled(左腿)", "label_off": "disabled(左腿)"}),
+                "right_leg": ("BOOLEAN", {"default": False, "label_on": "enabled(右腿)", "label_off": "disabled(右腿)"}),
+                "left_shoe": ("BOOLEAN", {"default": False, "label_on": "enabled(左鞋)", "label_off": "disabled(左鞋)"}),
+                "right_shoe": ("BOOLEAN", {"default": False, "label_on": "enabled(右鞋)", "label_off": "disabled(右鞋)"}),
+                "upper_clothes": ("BOOLEAN", {"default": False, "label_on": "enabled(上衣)", "label_off": "disabled(上衣)"}),
+                "skirt": ("BOOLEAN", {"default": False, "label_on": "enabled(短裙)", "label_off": "disabled(短裙)"}),
+                "pants": ("BOOLEAN", {"default": False, "label_on": "enabled(裤子)", "label_off": "disabled(裤子)"}),
+                "dress": ("BOOLEAN", {"default": False, "label_on": "enabled(连衣裙)", "label_off": "disabled(连衣裙)"}),
+                "belt": ("BOOLEAN", {"default": False, "label_on": "enabled(腰带)", "label_off": "disabled(腰带)"}),
+                "bag": ("BOOLEAN", {"default": False, "label_on": "enabled(背包)", "label_off": "disabled(背包)"}),
+                "scarf": ("BOOLEAN", {"default": False, "label_on": "enabled(围巾)", "label_off": "disabled(围巾)"}),
                 "detail_method": (method_list,),
                 "detail_erode": ("INT", {"default": 8, "min": 1, "max": 255, "step": 1}),
                 "detail_dilate": ("INT", {"default": 6, "min": 1, "max": 255, "step": 1}),
@@ -457,6 +448,9 @@ class SegformerUltraV2:
                 "process_detail": ("BOOLEAN", {"default": True}),
                 "device": (device_list,),
                 "max_megapixels": ("FLOAT", {"default": 2.0, "min": 1, "max": 999, "step": 0.1}),
+            },
+            "optional": {
+                "bodySegmentationPart": ("STRING", {"default": None}),
             }
         }
 
@@ -466,13 +460,102 @@ class SegformerUltraV2:
     CATEGORY = '😺dzNodes/LayerMask'
 
     def segformer_ultra_v2(self, image, segformer_pipeline,
+                        face, hat, hair, sunglass,
+                        left_leg, right_leg, left_arm, right_arm, left_shoe, right_shoe,
+                        upper_clothes, skirt, pants, dress, belt, bag, scarf,
                         detail_method, detail_erode, detail_dilate, black_point, white_point,
                         process_detail, device, max_megapixels,
-                        ):
+                        bodySegmentationPart=None):
         model = segformer_pipeline.model_name
-        labels_to_keep = segformer_pipeline.segment_label
+        
+        # Handle bodySegmentationPart if provided
+        if bodySegmentationPart is not None:
+            if bodySegmentationPart == "One-Pieces" or bodySegmentationPart == "Both":
+                labels_to_keep = [0, 1, 2, 3, 8, 9, 10, 11, 16, 17]  # Include background
+            elif bodySegmentationPart == "Tops":
+                labels_to_keep = [0, 1, 2, 3, 5, 6, 8, 9, 10, 11, 12, 13, 16, 17]  # Include background
+            elif bodySegmentationPart == "Bottoms":
+                labels_to_keep = [0, 1, 2, 3, 4, 8, 9, 10, 11, 14, 15, 16, 17]  # Include background
+            else:
+                # If invalid value, fall back to default behavior
+                labels_to_keep = [0]  # Start with background
+                if not hat:
+                    labels_to_keep.append(1)
+                if not hair:
+                    labels_to_keep.append(2)
+                if not sunglass:
+                    labels_to_keep.append(3)
+                if not upper_clothes:
+                    labels_to_keep.append(4)
+                if not skirt:
+                    labels_to_keep.append(5)
+                if not pants:
+                    labels_to_keep.append(6)
+                if not dress:
+                    labels_to_keep.append(7)
+                if not belt:
+                    labels_to_keep.append(8)
+                if not left_shoe:
+                    labels_to_keep.append(9)
+                if not right_shoe:
+                    labels_to_keep.append(10)
+                if not face:
+                    labels_to_keep.append(11)
+                if not left_leg:
+                    labels_to_keep.append(12)
+                if not right_leg:
+                    labels_to_keep.append(13)
+                if not left_arm:
+                    labels_to_keep.append(14)
+                if not right_arm:
+                    labels_to_keep.append(15)
+                if not bag:
+                    labels_to_keep.append(16)
+                if not scarf:
+                    labels_to_keep.append(17)
+        else:
+            # Default behavior when bodySegmentationPart is not provided
+            labels_to_keep = [0]  # Start with background
+            if not hat:
+                labels_to_keep.append(1)
+            if not hair:
+                labels_to_keep.append(2)
+            if not sunglass:
+                labels_to_keep.append(3)
+            if not upper_clothes:
+                labels_to_keep.append(4)
+            if not skirt:
+                labels_to_keep.append(5)
+            if not pants:
+                labels_to_keep.append(6)
+            if not dress:
+                labels_to_keep.append(7)
+            if not belt:
+                labels_to_keep.append(8)
+            if not left_shoe:
+                labels_to_keep.append(9)
+            if not right_shoe:
+                labels_to_keep.append(10)
+            if not face:
+                labels_to_keep.append(11)
+            if not left_leg:
+                labels_to_keep.append(12)
+            if not right_leg:
+                labels_to_keep.append(13)
+            if not left_arm:
+                labels_to_keep.append(14)
+            if not right_arm:
+                labels_to_keep.append(15)
+            if not bag:
+                labels_to_keep.append(16)
+            if not scarf:
+                labels_to_keep.append(17)
+
         ret_images = []
         ret_masks = []
+        print("LABELS_TO_KEEP")
+        print(labels_to_keep)
+        print(bodySegmentationPart)
 
         if detail_method == 'VITMatte(local)':
             local_files_only = True
@@ -516,17 +599,279 @@ class SegformerUltraV2:
         log(f"{self.NODE_NAME} Processed {len(ret_images)} image(s).", message_type='finish')
         return (torch.cat(ret_images, dim=0), torch.cat(ret_masks, dim=0),)
 
+class LisaReduxImageCreate:
+    def __init__(self):
+        self.NODE_NAME = 'LisaReduxImageCreate'
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "left_image": ("IMAGE",),
+                "right_image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT")
+    RETURN_NAMES = ("image", "new_left_width", "new_left_height")
+    FUNCTION = "create_side_by_side"
+    CATEGORY = '😺dzNodes/LayerMask'
+
+    def create_side_by_side(self, left_image, right_image):
+        # Convert tensors to PIL images
+        left_pil = tensor2pil(left_image)
+        right_pil = tensor2pil(right_image)
+
+        # Get original dimensions
+        left_width, left_height = left_pil.size
+        right_width, right_height = right_pil.size
+
+        # Check if right image is landscape
+        is_right_landscape = right_width > right_height
+
+        if is_right_landscape:
+            # For landscape right image, stack vertically
+            new_width = right_width
+            new_height = right_height * 2
+            new_image = Image.new('RGB', (new_width, new_height))
+
+            # Calculate new dimensions for left image to fit width while maintaining aspect ratio
+            left_aspect_ratio = left_width / left_height
+            new_left_width = right_width
+            new_left_height = int(new_left_width / left_aspect_ratio)
+
+            # Resize left image to fit width
+            left_pil_resized = left_pil.resize((new_left_width, new_left_height), Image.Resampling.LANCZOS)
+
+            # Calculate y offset to center vertically if needed
+            if new_left_height < right_height:
+                y_offset = (right_height - new_left_height) // 2
+            else:
+                # If left image is too tall, resize to fit height
+                new_left_height = right_height
+                new_left_width = int(new_left_height * left_aspect_ratio)
+                left_pil_resized = left_pil.resize((new_left_width, new_left_height), Image.Resampling.LANCZOS)
+                # Center horizontally
+                y_offset = 0
+                x_offset = (right_width - new_left_width) // 2
+                
+            # Paste images - right image at bottom, left image at top
+            new_image.paste(right_pil, (0, right_height))
+            new_image.paste(left_pil_resized, (x_offset if new_left_height == right_height else 0, y_offset))
+        else:
+            # For non-landscape right image, stack horizontally
+            new_width = right_width * 2
+            new_height = right_height
+            new_image = Image.new('RGB', (new_width, new_height))
+
+            # Calculate new dimensions for left image to fit height while maintaining aspect ratio
+            left_aspect_ratio = left_width / left_height
+            new_left_height = right_height
+            new_left_width = int(new_left_height * left_aspect_ratio)
+
+            # If left image would be too wide, scale it down to fit half width
+            if new_left_width > right_width:
+                new_left_width = right_width
+                new_left_height = int(new_left_width / left_aspect_ratio)
+
+            # Resize left image
+            left_pil_resized = left_pil.resize((new_left_width, new_left_height), Image.Resampling.LANCZOS)
+
+            # Calculate y offset to center vertically if needed
+            y_offset = (right_height - new_left_height) // 2
+
+            # Paste images side by side
+            new_image.paste(right_pil, (right_width, 0))
+            new_image.paste(left_pil_resized, (0, y_offset))
+
+        # Convert back to tensor and return with dimensions
+        return (pil2tensor(new_image), new_left_width, new_left_height,)
+
+class LisaCalculateFluxAspectRatio:
+    def __init__(self):
+        self.NODE_NAME = 'LisaCalculateFluxAspectRatio'
+        # Portrait ratios (width:height, where height > width)
+        self.PORTRAIT_RATIOS = {
+            "2:3 (Classic Portrait)": (2, 3),
+            "3:4 (Golden Ratio)": (3, 4),
+            "3:5 (Elegant Vertical)": (3, 5),
+            "4:5 (Artistic Frame)": (4, 5),
+            "5:7 (Balanced Portrait)": (5, 7),
+            "5:8 (Tall Portrait)": (5, 8),
+            "7:9 (Modern Portrait)": (7, 9),
+            # "9:16 (Slim Vertical)": (9, 16),
+            # "9:19 (Tall Slim)": (9, 19),
+            # "9:21 (Ultra Tall)": (9, 21),
+        }
+        # Landscape ratios (width:height, where width > height)
+        self.LANDSCAPE_RATIOS = {
+            "3:2 (Golden Landscape)": (3, 2),
+            "4:3 (Classic Landscape)": (4, 3),
+            "5:3 (Wide Horizon)": (5, 3),
+            "5:4 (Balanced Frame)": (5, 4),
+            "7:5 (Elegant Landscape)": (7, 5),
+            "8:5 (Cinematic View)": (8, 5),
+            "9:7 (Artful Horizon)": (9, 7),
+            # "16:9 (Panorama)": (16, 9),
+            # "19:9 (Cinematic Ultrawide)": (19, 9),
+            # "21:9 (Epic Ultrawide)": (21, 9),
+        }
+        # Square ratio is available for both orientations
+        self.SQUARE_RATIO = {
+            "1:1 (Perfect Square)": (1, 1)
+        }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "FLOAT", "INT", "INT")
+    RETURN_NAMES = ("aspect_ratio_name", "aspect_ratio", "width", "height")
+    FUNCTION = "calculate_aspect_ratio"
+    CATEGORY = '😺dzNodes/LayerMask'
+
+    def round_to_64(self, value):
+        # Round to nearest multiple of 64
+        return ((value + 32) // 64) * 64
+
+    def calculate_aspect_ratio(self, image):
+        # Convert tensor to PIL image to get dimensions
+        pil_image = tensor2pil(image)
+        width, height = pil_image.size
+        
+        # Check if image is portrait or landscape
+        is_portrait = height > width
+        long_edge = max(width, height)
+        short_edge = min(width, height)
+        
+        # Calculate actual aspect ratio (always as long:short)
+        actual_ratio = long_edge / short_edge
+        
+        # Initialize variables for finding closest match
+        closest_ratio_name = None
+        closest_difference = float('inf')
+        
+        # Select the appropriate aspect ratios to check based on orientation
+        if is_portrait:
+            ratios_to_check = self.PORTRAIT_RATIOS
+            # Only add square if the ratio is very close to 1:1
+            if 0.95 <= (height / width) <= 1.05:
+                ratios_to_check = {**ratios_to_check, **self.SQUARE_RATIO}
+        else:
+            ratios_to_check = self.LANDSCAPE_RATIOS
+            # Only add square if the ratio is very close to 1:1
+            if 0.95 <= (width / height) <= 1.05:
+                ratios_to_check = {**ratios_to_check, **self.SQUARE_RATIO}
+        
+        # Compare with appropriate ratios
+        for ratio_name, (w, h) in ratios_to_check.items():
+            if is_portrait:
+                compare_ratio = h / w  # For portrait, use height/width
+            else:
+                compare_ratio = w / h  # For landscape, use width/height
+            
+            # Calculate difference
+            difference = abs((height/width if is_portrait else width/height) - compare_ratio)
+            
+            # Update if this is the closest match so far
+            if difference < closest_difference:
+                closest_difference = difference
+                closest_ratio_name = ratio_name
+        
+        # Get the winning ratio values from the appropriate dictionary
+        if closest_ratio_name in self.PORTRAIT_RATIOS:
+            winning_w, winning_h = self.PORTRAIT_RATIOS[closest_ratio_name]
+        elif closest_ratio_name in self.LANDSCAPE_RATIOS:
+            winning_w, winning_h = self.LANDSCAPE_RATIOS[closest_ratio_name]
+        else:
+            winning_w, winning_h = self.SQUARE_RATIO[closest_ratio_name]
+        
+        # Calculate aspect ratio float
+        if is_portrait:
+            aspect_ratio_float = winning_h / winning_w
+        else:
+            aspect_ratio_float = winning_w / winning_h
+
+        # Keep the long edge and calculate the other dimension
+        if is_portrait:
+            target_height = long_edge
+            target_width = int(target_height / aspect_ratio_float)
+        else:
+            target_width = long_edge
+            target_height = int(target_width / aspect_ratio_float)
+
+        # Scale down if exceeding 1536
+        if target_width > 1536 or target_height > 1536:
+            scale = 1536 / max(target_width, target_height)
+            target_width = int(target_width * scale)
+            target_height = int(target_height * scale)
+
+        # Round both dimensions to nearest multiple of 64
+        target_width = self.round_to_64(target_width)
+        target_height = self.round_to_64(target_height)
+
+        # Final check to ensure neither dimension exceeds 1536 after rounding
+        if target_width > 1536 or target_height > 1536:
+            scale = 1536 / max(target_width, target_height)
+            target_width = self.round_to_64(int(target_width * scale))
+            target_height = self.round_to_64(int(target_height * scale))
+
+        return (closest_ratio_name, float(aspect_ratio_float), target_width, target_height)
+
+class LisaPngToJpegNode:
+    def __init__(self):
+        self.NODE_NAME = 'LisaPngToJpegNode'
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "convert_to_jpeg"
+    CATEGORY = '😺dzNodes/LayerMask'
+
+    def convert_to_jpeg(self, image):
+        # Convert tensor to PIL image
+        pil_image = tensor2pil(image)
+        
+        # Create a new image with black background
+        background = Image.new('RGB', pil_image.size, (0, 0, 0))
+        
+        # Paste the original image onto the black background using alpha channel
+        if pil_image.mode == 'RGBA':
+            background.paste(pil_image, mask=pil_image.split()[3])
+        else:
+            background.paste(pil_image)
+        
+        # Convert back to tensor and return
+        return (pil2tensor(background),)
+
 NODE_CLASS_MAPPINGS = {
     "LayerMask: SegformerB2ClothesUltra": Segformer_B2_Clothes,
     "LayerMask: SegformerUltraV2": SegformerUltraV2,
     "LayerMask: SegformerClothesPipelineLoader": SegformerClothesPipelineLoader,
     "LayerMask: SegformerFashionPipelineLoader": SegformerFashionPipelineLoader,
+    "LayerMask: LisaReduxImageCreate": LisaReduxImageCreate,
+    "LayerMask: LisaCalculateFluxAspectRatio": LisaCalculateFluxAspectRatio,
+    "LayerMask: LisaPngToJpegNode": LisaPngToJpegNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LayerMask: SegformerB2ClothesUltra": "LayerMask: Segformer B2 Clothes Ultra",
     "LayerMask: SegformerUltraV2": "LayerMask: Segformer Ultra V2",
     "LayerMask: SegformerClothesPipelineLoader": "LayerMask: Segformer Clothes Pipeline",
-    "LayerMask: SegformerFashionPipelineLoader": "LayerMask: Segformer Fashion Pipeline"
+    "LayerMask: SegformerFashionPipelineLoader": "LayerMask: Segformer Fashion Pipeline",
+    "LayerMask: LisaReduxImageCreate": "LayerMask: Lisa Redux Image Create",
+    "LayerMask: LisaCalculateFluxAspectRatio": "LayerMask: Lisa Calculate Flux Aspect Ratio",
+    "LayerMask: LisaPngToJpegNode": "LayerMask: Lisa Png to Jpeg Node",
 }
 
